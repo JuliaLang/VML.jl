@@ -10,7 +10,7 @@ const VML_EP = VMLAccuracy(0x00000003)
 
 Base.show(io::IO, m::VMLAccuracy) = print(io, m == VML_LA ? "VML_LA" :
                                               m == VML_HA ? "VML_HA" : "VML_EP")
-                                              
+
 vml_get_mode() = ccall((:vmlGetMode, MKL_jll.libmkl_rt), Cuint, ())
 vml_set_mode(mode::Integer) = (ccall((:vmlSetMode, MKL_jll.libmkl_rt), Cuint, (UInt,), mode); nothing)
 
@@ -46,6 +46,15 @@ function vml_prefix(t::DataType)
     error("unknown type $t")
 end
 
+getstride(::Array) = 1
+getstride(x::StridedVector) = stride(x, 1)
+getstride(x) = begin
+    sz, st = size(x), strides(x)
+    n = !in.(sz .* sz, Ref(st)) |> count
+    n > 1 && throw(ArgumentError("Invalid memory layout."))
+    minimum(st)
+end
+
 function def_unary_op(tin, tout, jlname, jlname!, mklname;
         vmltype = tin)
     mklfn = Base.Meta.quot(Symbol("$(vml_prefix(vmltype))$mklname"))
@@ -53,24 +62,27 @@ function def_unary_op(tin, tout, jlname, jlname!, mklname;
     (@isdefined jlname) || push!(exports, jlname)
     (@isdefined jlname!) || push!(exports, jlname!)
     @eval begin
-        function ($jlname!)(out::Array{$tout}, A::Array{$tin})
+        function ($jlname!)(out::StridedArray{$tout}, A::StridedArray{$tin})
             size(out) == size(A) || throw(DimensionMismatch())
-            ccall(($mklfn, MKL_jll.libmkl_rt), Nothing, (Int, Ptr{$tin}, Ptr{$tout}), length(A), A, out)
+            stᵒ, stᴬ = getstride(out), getstride(A)
+            ccall(($mklfn, MKL_jll.libmkl_rt), Nothing, (Int, Ptr{$tin}, Int, Ptr{$tout}, Int), length(A), A, stᴬ, out, stᵒ)
             vml_check_error()
             return out
         end
         $(if tin == tout
             quote
-                function $(jlname!)(A::Array{$tin})
-                    ccall(($mklfn, MKL_jll.libmkl_rt), Nothing, (Int, Ptr{$tin}, Ptr{$tout}), length(A), A, A)
+                function $(jlname!)(A::StridedArray{$tin})
+                    stᴬ = getstride(A)
+                    ccall(($mklfn, MKL_jll.libmkl_rt), Nothing, (Int, Ptr{$tin}, Int, Ptr{$tout}, Int), length(A), A, stᴬ, A, stᴬ)
                     vml_check_error()
                     return A
                 end
             end
         end)
-        function ($jlname)(A::Array{$tin})
+        function ($jlname)(A::StridedArray{$tin})
             out = similar(A, $tout)
-            ccall(($mklfn, MKL_jll.libmkl_rt), Nothing, (Int, Ptr{$tin}, Ptr{$tout}), length(A), A, out)
+            stᵒ, stᴬ = getstride(out), getstride(A)
+            ccall(($mklfn, MKL_jll.libmkl_rt), Nothing, (Int, Ptr{$tin}, Int, Ptr{$tout}, Int), length(A), A, stᴬ, out, stᵒ)
             vml_check_error()
             return out
         end
@@ -85,16 +97,18 @@ function def_binary_op(tin, tout, jlname, jlname!, mklname, broadcast)
     (@isdefined jlname!) || push!(exports, jlname!)
     @eval begin
         $(isempty(exports) ? nothing : Expr(:export, exports...))
-        function ($jlname!)(out::Array{$tout}, A::Array{$tin}, B::Array{$tin}) 
+        function ($jlname!)(out::StridedArray{$tout}, A::StridedArray{$tin}, B::StridedArray{$tin})
             size(out) == size(A) == size(B) || throw(DimensionMismatch("Input arrays and output array need to have the same size"))
-            ccall(($mklfn, MKL_jll.libmkl_rt), Nothing, (Int, Ptr{$tin}, Ptr{$tin}, Ptr{$tout}), length(A), A, B, out)
+            stᵒ, stᴬ, stᴮ = getstride(out), getstride(A), getstride(B)
+            ccall(($mklfn, MKL_jll.libmkl_rt), Nothing, (Int, Ptr{$tin}, Int, Ptr{$tin}, Int, Ptr{$tout}, Int), length(A), A, stᴬ, B, stᴮ, out, stᵒ)
             vml_check_error()
             return out
         end
-        function ($jlname)(A::Array{$tout}, B::Array{$tin}) 
+        function ($jlname)(A::StridedArray{$tout}, B::StridedArray{$tin})
             size(A) == size(B) || throw(DimensionMismatch("Input arrays need to have the same size"))
             out = similar(A)
-            ccall(($mklfn, MKL_jll.libmkl_rt), Nothing, (Int, Ptr{$tin}, Ptr{$tin}, Ptr{$tout}), length(A), A, B, out)
+            stᵒ, stᴬ, stᴮ = getstride(out), getstride(A), getstride(B)
+            ccall(($mklfn, MKL_jll.libmkl_rt), Nothing, (Int, Ptr{$tin}, Int, Ptr{$tin}, Int, Ptr{$tout}, Int), length(A), A, stᴬ, B, stᴮ, out, stᵒ)
             vml_check_error()
             return out
         end
